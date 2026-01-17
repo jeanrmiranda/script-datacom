@@ -1,0 +1,81 @@
+import paramiko
+import telnetlib
+import time
+import sys
+
+ARQUIVO_IPS = "DMOS-todos-ips.txt"
+
+CREDENCIAIS = [
+    ("admin", "admin"),
+    ("dmview", "dmview@toledo"),
+    ("jean", "portugal@1985"),
+    ("jean", "Portugal@1985"),
+]
+
+# ---------- UTIL ----------
+def ler_ips(nome_arquivo):
+    try:
+        with open(nome_arquivo, "r") as f:
+            return [linha.strip() for linha in f if linha.strip()]
+    except FileNotFoundError:
+        print(f"❌ Arquivo {nome_arquivo} não encontrado")
+        sys.exit(1)
+
+# ---------- SSH ----------
+def testar_ssh(ip, user, password):
+    ssh = paramiko.SSHClient()
+    ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    try:
+        ssh.connect(
+            hostname=ip,
+            username=user,
+            password=password,
+            timeout=5,
+            allow_agent=False,
+            look_for_keys=False
+        )
+        ssh.close()
+        return True
+    except Exception:
+        return False
+
+# ---------- TELNET ----------
+def testar_telnet(ip, user, password):
+    try:
+        tn = telnetlib.Telnet(ip, timeout=5)
+        tn.read_until(b"Username:", timeout=3)
+        tn.write(user.encode() + b"\n")
+        tn.read_until(b"Password:", timeout=3)
+        tn.write(password.encode() + b"\n")
+        time.sleep(2)
+        saida = tn.read_very_eager().decode(errors="ignore")
+        tn.close()
+
+        if "invalid" in saida.lower() or "failed" in saida.lower():
+            return False
+        return True
+    except Exception:
+        return False
+
+# ---------- MAIN ----------
+ips = ler_ips(ARQUIVO_IPS)
+
+for ip in ips:
+    print(f"\n🔍 Testando IP: {ip}")
+    login_ok = False
+
+    for user, password in CREDENCIAIS:
+        # Tenta SSH
+        if testar_ssh(ip, user, password):
+            print(f"✅ LOGIN OK - {ip} - SSH - {user}")
+            login_ok = True
+            break
+
+        # Se SSH falhar, tenta TELNET
+        if testar_telnet(ip, user, password):
+            print(f"✅ LOGIN OK - {ip} - TELNET - {user}")
+            login_ok = True
+            break
+
+    if not login_ok:
+        print(f"❌ Nenhuma credencial funcionou para {ip}")

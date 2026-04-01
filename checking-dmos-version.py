@@ -68,13 +68,14 @@ def conectar_ssh(ip, user, password):
     except Exception:
         return None
 
-def aplicar_config_ssh(ssh, ip):
+def aplicar_comandos_ssh(ssh, ip):
     try:
         shell = ssh.invoke_shell()
         time.sleep(2)
 
         output_total = ""
-        if shell.recv_ready():
+
+        while shell.recv_ready():
             output_total += shell.recv(65535).decode(errors="ignore")
 
         for cmd in COMANDOS_CONFIG:
@@ -82,47 +83,91 @@ def aplicar_config_ssh(ssh, ip):
             time.sleep(2)
 
             output = ""
-            tentativas = 0
+            tentativas_sem_saida = 0
 
-            while tentativas < 5:
+            while tentativas_sem_saida < 5:
                 time.sleep(1)
                 if shell.recv_ready():
                     output += shell.recv(65535).decode(errors="ignore")
-                    tentativas = 0
+                    tentativas_sem_saida = 0
                 else:
-                    tentativas += 1
+                    tentativas_sem_saida += 1
 
-            output_total += f"\n##### COMANDO: {cmd} #####\n"
-            output_total += output
+            output_total += f"\n##### COMANDO: {cmd} #####\n{output}"
 
-        print(f"\n📡 RESULTADO - {ip}\n{output_total}")
-        log(LOG_CFG, f"{ip} - OUTPUT:\n{output_total}")
+        print(f"\n📡 RESULTADO SSH - {ip}\n{output_total}")
+        log(LOG_CFG, f"{ip} - SSH OUTPUT:\n{output_total}")
 
     except Exception as e:
-        print(f"❌ Erro ao executar comando no IP {ip}: {e}")
-        log(LOG_FAIL, f"{ip} - ERRO EXEC CMD SSH: {e}")
+        print(f"❌ Erro ao executar comando SSH em {ip}: {e}")
+        log(LOG_FAIL, f"{ip} - ERRO CMD SSH: {e}")
 
 # ---------- TELNET ----------
-def testar_telnet(ip, user, password):
+def conectar_telnet(ip, user, password):
     try:
         tn = telnetlib.Telnet(ip, timeout=5)
-        tn.read_until(b"Username:", timeout=3)
+
+        # tenta ler login
+        idx, match, text = tn.expect([b"Username:", b"login:"], timeout=3)
+        if idx == -1:
+            tn.close()
+            return None
+
         tn.write(user.encode() + b"\n")
-        tn.read_until(b"Password:", timeout=3)
+
+        idx, match, text = tn.expect([b"Password:"], timeout=3)
+        if idx == -1:
+            tn.close()
+            return None
+
         tn.write(password.encode() + b"\n")
         time.sleep(2)
 
-        saida = tn.read_very_eager().decode(errors="ignore")
+        saida = tn.read_very_eager().decode(errors="ignore").lower()
 
-        if "invalid" in saida.lower() or "failed" in saida.lower():
+        erros = [
+            "invalid",
+            "failed",
+            "incorrect",
+            "login invalid",
+            "authentication failed",
+            "access denied",
+            "bad password"
+        ]
+
+        if any(erro in saida for erro in erros):
             tn.close()
-            return False
+            return None
 
-        return tn
+        # tenta confirmar prompt
+        tn.write(b"\n")
+        time.sleep(1)
+        saida2 = tn.read_very_eager().decode(errors="ignore")
+
+        prompts = ["#", ">", "$"]
+        if any(p in saida2 for p in prompts):
+            return tn
+
+        # alguns equipamentos aceitam e não mostram prompt logo de cara
+        # então ainda tentamos um comando simples para validar
+        tn.write(b"show system\n")
+        time.sleep(2)
+        saida3 = tn.read_very_eager().decode(errors="ignore").lower()
+
+        if any(erro in saida3 for erro in erros):
+            tn.close()
+            return None
+
+        if saida3.strip():
+            return tn
+
+        tn.close()
+        return None
+
     except Exception:
         return None
 
-def aplicar_comando_telnet(tn, ip):
+def aplicar_comandos_telnet(tn, ip):
     try:
         output_total = ""
 
@@ -130,18 +175,27 @@ def aplicar_comando_telnet(tn, ip):
             tn.write(cmd.encode() + b"\n")
             time.sleep(2)
 
-            output = tn.read_very_eager().decode(errors="ignore")
-            output_total += f"\n##### COMANDO: {cmd} #####\n"
-            output_total += output
+            output = ""
+            tentativas_sem_saida = 0
+
+            while tentativas_sem_saida < 5:
+                time.sleep(1)
+                parcial = tn.read_very_eager().decode(errors="ignore")
+                if parcial:
+                    output += parcial
+                    tentativas_sem_saida = 0
+                else:
+                    tentativas_sem_saida += 1
+
+            output_total += f"\n##### COMANDO: {cmd} #####\n{output}"
 
         print(f"\n📡 RESULTADO TELNET - {ip}\n{output_total}")
-        log(LOG_CFG, f"{ip} - OUTPUT TELNET:\n{output_total}")
-
+        log(LOG_CFG, f"{ip} - TELNET OUTPUT:\n{output_total}")
         tn.close()
 
     except Exception as e:
-        print(f"❌ Erro ao executar comando via TELNET no IP {ip}: {e}")
-        log(LOG_FAIL, f"{ip} - ERRO EXEC CMD TELNET: {e}")
+        print(f"❌ Erro ao executar comando TELNET em {ip}: {e}")
+        log(LOG_FAIL, f"{ip} - ERRO CMD TELNET: {e}")
 
 # ---------- MAIN ----------
 def main():
@@ -158,26 +212,30 @@ def main():
         autenticado = False
 
         for user, password in CREDENCIAIS:
+            print(f"   ↳ Testando credencial: {user} / {password}")
+
             ssh = conectar_ssh(ip, user, password)
-            if ssh:
+            if ssh is not None:
                 print(f"✅ LOGIN OK - {ip} - SSH - {user}")
                 log(LOG_OK, f"{ip} - SSH - {user}")
-                aplicar_config_ssh(ssh, ip)
+                aplicar_comandos_ssh(ssh, ip)
                 ssh.close()
                 autenticado = True
                 break
 
-            tn = testar_telnet(ip, user, password)
-            if tn:
-                print(f"⚠️ LOGIN OK - {ip} - TELNET - {user}")
+            tn = conectar_telnet(ip, user, password)
+            if tn is not None:
+                print(f"✅ LOGIN OK - {ip} - TELNET - {user}")
                 log(LOG_OK, f"{ip} - TELNET - {user}")
-                aplicar_comando_telnet(tn, ip)
+                aplicar_comandos_telnet(tn, ip)
                 autenticado = True
                 break
 
+            print(f"   ❌ Falhou: {user} / {password}")
+
         if not autenticado:
             print(f"❌ LOGIN FAIL - {ip}")
-            log(LOG_FAIL, ip)
+            log(LOG_FAIL, f"{ip} - nenhuma credencial funcionou")
 
 if __name__ == "__main__":
     main()

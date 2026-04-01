@@ -6,6 +6,7 @@ import time
 import sys
 import subprocess
 import ipaddress
+import socket
 from datetime import datetime
 
 REDE = "10.0.80.0/24"
@@ -45,6 +46,16 @@ def ping(ip):
             stderr=subprocess.DEVNULL
         )
         return resultado.returncode == 0
+    except Exception:
+        return False
+
+def porta_aberta(ip, porta, timeout=3):
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.settimeout(timeout)
+    try:
+        s.connect((ip, porta))
+        s.close()
+        return True
     except Exception:
         return False
 
@@ -107,15 +118,21 @@ def conectar_telnet(ip, user, password):
     try:
         tn = telnetlib.Telnet(ip, timeout=5)
 
-        # tenta ler login
-        idx, match, text = tn.expect([b"Username:", b"login:"], timeout=3)
+        # aceita vários prompts possíveis de usuário
+        idx, match, text = tn.expect(
+            [b"User:", b"Username:", b"login:", b"user:", b"username:"],
+            timeout=5
+        )
         if idx == -1:
             tn.close()
             return None
 
         tn.write(user.encode() + b"\n")
 
-        idx, match, text = tn.expect([b"Password:"], timeout=3)
+        idx, match, text = tn.expect(
+            [b"Password:", b"password:"],
+            timeout=5
+        )
         if idx == -1:
             tn.close()
             return None
@@ -123,7 +140,7 @@ def conectar_telnet(ip, user, password):
         tn.write(password.encode() + b"\n")
         time.sleep(2)
 
-        saida = tn.read_very_eager().decode(errors="ignore").lower()
+        saida = tn.read_very_eager().decode(errors="ignore")
 
         erros = [
             "invalid",
@@ -132,29 +149,31 @@ def conectar_telnet(ip, user, password):
             "login invalid",
             "authentication failed",
             "access denied",
-            "bad password"
+            "bad password",
+            "denied",
+            "error"
         ]
 
-        if any(erro in saida for erro in erros):
+        if any(erro in saida.lower() for erro in erros):
             tn.close()
             return None
 
-        # tenta confirmar prompt
+        # força nova leitura do prompt
         tn.write(b"\n")
         time.sleep(1)
         saida2 = tn.read_very_eager().decode(errors="ignore")
 
-        prompts = ["#", ">", "$"]
-        if any(p in saida2 for p in prompts):
+        prompts_validos = ["#", ">", "$", ") >", ")#", "]#", "] >"]
+
+        if any(p in saida2 for p in prompts_validos):
             return tn
 
-        # alguns equipamentos aceitam e não mostram prompt logo de cara
-        # então ainda tentamos um comando simples para validar
+        # fallback: tenta rodar comando pra validar login
         tn.write(b"show system\n")
-        time.sleep(2)
-        saida3 = tn.read_very_eager().decode(errors="ignore").lower()
+        time.sleep(3)
+        saida3 = tn.read_very_eager().decode(errors="ignore")
 
-        if any(erro in saida3 for erro in erros):
+        if any(erro in saida3.lower() for erro in erros):
             tn.close()
             return None
 
@@ -214,22 +233,26 @@ def main():
         for user, password in CREDENCIAIS:
             print(f"   ↳ Testando credencial: {user} / {password}")
 
-            ssh = conectar_ssh(ip, user, password)
-            if ssh is not None:
-                print(f"✅ LOGIN OK - {ip} - SSH - {user}")
-                log(LOG_OK, f"{ip} - SSH - {user}")
-                aplicar_comandos_ssh(ssh, ip)
-                ssh.close()
-                autenticado = True
-                break
+            # tenta SSH primeiro se porta 22 aberta
+            if porta_aberta(ip, 22, timeout=2):
+                ssh = conectar_ssh(ip, user, password)
+                if ssh is not None:
+                    print(f"✅ LOGIN OK - {ip} - SSH - {user}")
+                    log(LOG_OK, f"{ip} - SSH - {user}")
+                    aplicar_comandos_ssh(ssh, ip)
+                    ssh.close()
+                    autenticado = True
+                    break
 
-            tn = conectar_telnet(ip, user, password)
-            if tn is not None:
-                print(f"✅ LOGIN OK - {ip} - TELNET - {user}")
-                log(LOG_OK, f"{ip} - TELNET - {user}")
-                aplicar_comandos_telnet(tn, ip)
-                autenticado = True
-                break
+            # tenta TELNET se porta 23 aberta
+            if porta_aberta(ip, 23, timeout=2):
+                tn = conectar_telnet(ip, user, password)
+                if tn is not None:
+                    print(f"✅ LOGIN OK - {ip} - TELNET - {user}")
+                    log(LOG_OK, f"{ip} - TELNET - {user}")
+                    aplicar_comandos_telnet(tn, ip)
+                    autenticado = True
+                    break
 
             print(f"   ❌ Falhou: {user} / {password}")
 
